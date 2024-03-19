@@ -36,4 +36,4 @@ if __name__ == '__main__':
     app.bind_entrypoint(api_v1)
     app.add_api_route("/request_vote_rpc", request_vote, methods=["GET"])
     app.add_api_route("/append_entries_rpc", append_entries, methods=["GET"])
-    uvicorn.run(app, host=my_raft.loc_ip, port=my_raft.self_port, log_level="critical")
+    uvicorn.run(app, host=my_raft.loc_ip, port=my_raft.port, log_level="critical")
