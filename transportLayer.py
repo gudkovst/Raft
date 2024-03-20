@@ -8,13 +8,13 @@ from pydantic import BaseModel
 class Transport:
 
     @abstractmethod
-    def send(self, method: str, params, addr: str = None, port: str = None):
+    def send(self, method: str, params, addr: str, port: str):
         pass
 
 
-class RPC_Transport(Transport):
+class TransportRPC(Transport):
 
-    def send(self, method: str, params, addr: str = None, port: str = None):
+    def send(self, method: str, params, addr: str, port: str):
         return self.call_rpc(method, params, addr, port)
 
     def call_rpc(self, method: str, rpc_params: BaseModel, addr: str, port: str):

@@ -12,20 +12,22 @@ class MyError(jsonrpc.BaseError):
 
 
 class VoteInDataModel(BaseModel):
-    term: float
-    candidate_id: str
+    term: int
+    candidate_id: int
+    last_log_index: int
+    last_log_term: int
 
 
 class VoteOutDataModel(BaseModel):
-    term: float
+    term: int
     vote_granted: bool
 
 
 class AppendInDataModel(BaseModel):
-    term: float
+    term: int
     leader_id: str
 
 
 class AppendOutDataModel(BaseModel):
-    term: float
+    term: int
     success: bool

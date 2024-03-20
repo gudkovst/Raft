@@ -1,22 +1,23 @@
-import json
 import random
-import sys
 import time
-from contextlib import asynccontextmanager
 from enum import Enum
 from threading import Timer
-from transportLayer import RPC_Transport
-import requests
-import uvicorn
-from pydantic import BaseModel
+
 from messages import *
-import fastapi_jsonrpc as jsonrpc
+from transportLayer import TransportRPC
 
 
 class State(Enum):
     FOLLOWER = 0
     CANDIDATE = 1
     LEADER = 2
+
+
+class Entry:
+
+    def __init__(self, cmd, term: int):
+        self.cmd = cmd
+        self.term = term
 
 
 class RepeatTimer(Timer):
@@ -27,18 +28,23 @@ class RepeatTimer(Timer):
 
 class MySyncObj:
     loc_ip = "localhost"
+    port: int = None
     other_ports = []
+
     cur_state = State.FOLLOWER
-    port = None
-    port_for_rpc = None
-    heartbeat = False
     cur_term = 0
     voted_for = None
+    log: list[Entry] = []
+    commit_index = 0
+    last_applied = 0
+    next_index = []
+    match_index = []
+
+    heartbeat = False
     timestamp = None
     timer = None
     election_timeout = None
-    loc_index = 0
-    transport = RPC_Transport()
+    transport = TransportRPC()
 
     def __init__(self):
         self.timer = RepeatTimer(5.0, self.do_work)
@@ -61,7 +67,6 @@ class MySyncObj:
         for p in range(int(starting_p), last_p):
             if p != int(self_p):
                 self.other_ports.append(p)
-        self.port_for_rpc = str(self.other_ports[0])
 
     def quorum(self, voted: int) -> bool:
         return voted > len(self.other_ports) / 2
@@ -90,12 +95,14 @@ class MySyncObj:
         self.voted_for = self.port
         votes = 1
         for port in self.other_ports:
-            response = self.transport.send("request_vote",
-                                           VoteInDataModel(term=self.cur_term, candidate_id=str(self.port)),
-                                           self.loc_ip, port)
+            last_log_term = self.log[-1].term if len(self.log) else 0
+            msg = VoteInDataModel(term=self.cur_term, candidate_id=self.port, last_log_index=len(self.log),
+                                  last_log_term=last_log_term)
+            response = self.transport.send("request_vote", msg, self.loc_ip, port)
             try:
                 if int(response["term"]) > self.cur_term:
                     self.cur_term = int(response["term"])
+                    self.voted_for = None
                     self.cur_state = State.FOLLOWER
                     return
                 if bool(response["vote_granted"]):
@@ -110,18 +117,22 @@ class MySyncObj:
             for port in self.other_ports:
                 self.transport.send("append_entries", AppendInDataModel(term=self.cur_term, leader_id=str(self.port)),
                                     self.loc_ip, port)
+            self.next_index = [len(self.log) + 1] * (len(self.other_ports) + 1)
+            self.match_index = [0] * (len(self.other_ports) + 1)
         self.heartbeat = True
         self.set_election_tm(success_elec=False)
 
     def request_vote_handler(self, in_params: VoteInDataModel) -> VoteOutDataModel:
         self.updTM()
         vote_granted = False
-        print("Vote request from " + in_params.candidate_id + " to " + str(self.port))
-        if self.cur_term <= in_params.term:
+        print("Vote request from " + str(in_params.candidate_id) + " to " + str(self.port))
+        if self.cur_term <= in_params.term and self.voted_for in [None, in_params.candidate_id] and \
+                len(self.log) <= in_params.last_log_index:
             vote_granted = True
             self.voted_for = in_params.candidate_id
             self.cur_term = in_params.term
-            print("VOTED FOR " + " " + in_params.candidate_id)
+            self.cur_state = State.FOLLOWER
+            print("VOTED FOR " + " " + str(in_params.candidate_id))
         return VoteOutDataModel(term=self.cur_term, vote_granted=vote_granted)
 
     def append_entries_handler(self, in_params: AppendInDataModel) -> AppendOutDataModel:
