@@ -8,16 +8,16 @@ from pydantic import BaseModel
 class Transport:
 
     @abstractmethod
-    def send(self, method: str, params, addr: str, port: str):
+    def send(self, method: str, params, addr, port):
         pass
 
 
 class TransportRPC(Transport):
 
-    def send(self, method: str, params, addr: str, port: str):
+    def send(self, method: str, params, addr, port):
         return self.call_rpc(method, params, addr, port)
 
-    def call_rpc(self, method: str, rpc_params: BaseModel, addr: str, port: str):
+    def call_rpc(self, method: str, rpc_params: BaseModel, addr, port):
         dest = str(addr) + ":" + str(port)
         url = "http://" + dest + "/api/v1/jsonrpc"
         headers = {'content-type': 'application/json'}

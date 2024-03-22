@@ -25,7 +25,11 @@ class VoteOutDataModel(BaseModel):
 
 class AppendInDataModel(BaseModel):
     term: int
-    leader_id: str
+    leader_id: int
+    prev_log_index: int
+    prev_log_term: int
+    entries: list
+    leader_commit: int
 
 
 class AppendOutDataModel(BaseModel):

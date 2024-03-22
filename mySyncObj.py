@@ -30,6 +30,7 @@ class MySyncObj:
     loc_ip = "localhost"
     port: int = None
     other_ports = []
+    start_port = None
 
     cur_state = State.FOLLOWER
     cur_term = 0
@@ -63,13 +64,20 @@ class MySyncObj:
 
     def init_address(self, starting_p, self_p, amount):
         self.port = int(self_p)
-        last_p = int(starting_p) + int(amount)
-        for p in range(int(starting_p), last_p):
+        self.start_port = int(starting_p)
+        last_p = self.start_port + int(amount)
+        for p in range(self.start_port, last_p):
             if p != int(self_p):
                 self.other_ports.append(p)
 
     def quorum(self, voted: int) -> bool:
         return voted > len(self.other_ports) / 2
+
+    def send_heartbeat(self, to: int):
+        pr_log_term = self.log[-1].term if len(self.log) else 0
+        msg = AppendInDataModel(term=self.cur_term, leader_id=self.port, prev_log_index=len(self.log),
+                                prev_log_term=pr_log_term, entries=[], leader_commit=self.commit_index)
+        self.transport.send("append_entries", msg, self.loc_ip, to)
 
     def do_work(self):
         now = time.time()
@@ -78,10 +86,28 @@ class MySyncObj:
         if self.cur_state == State.LEADER:
             self.updTM()
             for port in self.other_ports:
-                res = self.transport.send("append_entries",
-                                          AppendInDataModel(term=self.cur_term, leader_id=str(self.port)),
-                                          self.loc_ip, port)
+                follower_num = port - self.start_port
+                entries = self.log[self.next_index[follower_num]:]
+                if not entries:
+                    self.send_heartbeat(port)
+                    continue
+                msg = AppendInDataModel(term=self.cur_term, leader_id=self.port, prev_log_index=self.next_index[follower_num],
+                                        prev_log_term=entries[0].term, entries=entries, leader_commit=self.commit_index)
+                res = self.transport.send("append_entries", msg, self.loc_ip, port)
                 print('append res', res)
+                try:
+                    if int(res["term"]) > self.cur_term:
+                        self.cur_term = int(res["term"])
+                        self.voted_for = None
+                        self.cur_state = State.FOLLOWER
+                    elif bool(res["success"]):
+                        self.next_index[follower_num] = len(self.log)
+                        self.match_index[follower_num] = len(self.log)
+                    else:
+                        self.next_index[follower_num] -= 1
+                except Exception:
+                    continue
+
         elif self.cur_state == State.FOLLOWER:
             if delay > self.election_timeout and not self.heartbeat:
                 self.cur_state = State.CANDIDATE
@@ -115,9 +141,8 @@ class MySyncObj:
             self.cur_state = State.LEADER
             print("IM LEADER")
             for port in self.other_ports:
-                self.transport.send("append_entries", AppendInDataModel(term=self.cur_term, leader_id=str(self.port)),
-                                    self.loc_ip, port)
-            self.next_index = [len(self.log) + 1] * (len(self.other_ports) + 1)
+                self.send_heartbeat(port)
+            self.next_index = [len(self.log)] * (len(self.other_ports) + 1)
             self.match_index = [0] * (len(self.other_ports) + 1)
         self.heartbeat = True
         self.set_election_tm(success_elec=False)
@@ -137,14 +162,21 @@ class MySyncObj:
 
     def append_entries_handler(self, in_params: AppendInDataModel) -> AppendOutDataModel:
         self.updTM()
-        success = False
-        print("Append request from " + in_params.leader_id + " to " + str(self.port))
+        print("Append request from " + str(in_params.leader_id) + " to " + str(self.port) + " with term " + str(in_params.term))
         if self.cur_term <= in_params.term:
             self.cur_state = State.FOLLOWER
-            success = True
             self.heartbeat = True
             self.cur_term = in_params.term
-        return AppendOutDataModel(term=self.cur_term, success=success)
+        if self.cur_term > in_params.term or in_params.prev_log_index > len(self.log):  # 1 and 2 rec impl
+            return AppendOutDataModel(term=self.cur_term, success=False)
+        for i, entry in enumerate(in_params.entries):  # 3 and 4 rec impl
+            if in_params.prev_log_index + i < len(self.log):
+                self.log[in_params.prev_log_index + i] = entry
+            else:
+                self.log.append(entry)
+        if in_params.leader_commit > self.commit_index:  # 5 rec impl
+            self.commit_index = min(in_params.leader_commit, len(self.log))
+        return AppendOutDataModel(term=self.cur_term, success=True)
 
     def start(self):
         self.cur_state = State.FOLLOWER
