@@ -1,9 +1,9 @@
 import random
 import time
-from enum import Enum
 from threading import Timer
 
 from messages import *
+from stateMachine import *
 from transportLayer import TransportRPC
 
 
@@ -11,13 +11,6 @@ class State(Enum):
     FOLLOWER = 0
     CANDIDATE = 1
     LEADER = 2
-
-
-class Entry:
-
-    def __init__(self, cmd, term: int):
-        self.cmd = cmd
-        self.term = term
 
 
 class RepeatTimer(Timer):
@@ -41,6 +34,7 @@ class MySyncObj:
     next_index = []
     match_index = []
 
+    state_machine = None
     heartbeat = False
     timestamp = None
     timer = None
@@ -49,6 +43,7 @@ class MySyncObj:
 
     def __init__(self):
         self.timer = RepeatTimer(5.0, self.do_work)
+        self.state_machine = StateMachine()
 
     def updTM(self):
         self.timestamp = time.time()
@@ -83,6 +78,10 @@ class MySyncObj:
         now = time.time()
         delay = now - self.timestamp
         # print("Delay: " + str(int(delay / 60)) + " minutes; " + str(int(delay % 60)) + " seconds")
+        if self.commit_index > self.last_applied:  # TODO respond client after apply from leader
+            self.state_machine.apply(self.log[self.last_applied])
+            self.last_applied += 1
+
         if self.cur_state == State.LEADER:
             self.updTM()
             for port in self.other_ports:
@@ -107,6 +106,11 @@ class MySyncObj:
                         self.next_index[follower_num] -= 1
                 except Exception:
                     continue
+            for N in range(len(self.log), self.commit_index, -1):
+                k_repl = sum([m >= N for m in self.match_index])
+                if self.quorum(k_repl) and self.log[N - 1].term == self.cur_term:
+                    self.commit_index = N
+                    break
 
         elif self.cur_state == State.FOLLOWER:
             if delay > self.election_timeout and not self.heartbeat:
@@ -167,6 +171,7 @@ class MySyncObj:
             self.cur_state = State.FOLLOWER
             self.heartbeat = True
             self.cur_term = in_params.term
+            self.voted_for = None
         if self.cur_term > in_params.term or in_params.prev_log_index > len(self.log):  # 1 and 2 rec impl
             return AppendOutDataModel(term=self.cur_term, success=False)
         for i, entry in enumerate(in_params.entries):  # 3 and 4 rec impl
