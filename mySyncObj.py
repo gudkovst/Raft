@@ -48,9 +48,6 @@ class MySyncObj:
     def updTM(self):
         self.timestamp = time.time()
 
-    def getTM(self):
-        return self.timestamp
-
     def set_election_tm(self, success_elec: bool = True):
         if success_elec:
             self.election_timeout = 5 + random.randint(10, 30) * 0.01
@@ -77,7 +74,6 @@ class MySyncObj:
     def do_work(self):
         now = time.time()
         delay = now - self.timestamp
-        # print("Delay: " + str(int(delay / 60)) + " minutes; " + str(int(delay % 60)) + " seconds")
         if self.commit_index > self.last_applied:  # TODO respond client after apply from leader
             self.state_machine.apply(self.log[self.last_applied])
             self.last_applied += 1
@@ -95,11 +91,7 @@ class MySyncObj:
                 res = self.transport.send("append_entries", msg, self.loc_ip, port)
                 print('append res', res)
                 try:
-                    if int(res["term"]) > self.cur_term:
-                        self.cur_term = int(res["term"])
-                        self.voted_for = None
-                        self.cur_state = State.FOLLOWER
-                    elif bool(res["success"]):
+                    if bool(res["success"]):
                         self.next_index[follower_num] = len(self.log)
                         self.match_index[follower_num] = len(self.log)
                     else:
@@ -151,7 +143,7 @@ class MySyncObj:
         self.heartbeat = True
         self.set_election_tm(success_elec=False)
 
-    def request_vote_handler(self, in_params: VoteInDataModel) -> VoteOutDataModel:
+    async def request_vote_handler(self, in_params: VoteInDataModel) -> VoteOutDataModel:
         self.updTM()
         vote_granted = False
         print("Vote request from " + str(in_params.candidate_id) + " to " + str(self.port))
@@ -164,15 +156,18 @@ class MySyncObj:
             print("VOTED FOR " + " " + str(in_params.candidate_id))
         return VoteOutDataModel(term=self.cur_term, vote_granted=vote_granted)
 
-    def append_entries_handler(self, in_params: AppendInDataModel) -> AppendOutDataModel:
+    async def append_entries_handler(self, in_params: AppendInDataModel) -> AppendOutDataModel:
         self.updTM()
         print("Append request from " + str(in_params.leader_id) + " to " + str(self.port) + " with term " + str(in_params.term))
+        success = True
         if self.cur_term <= in_params.term:
             self.cur_state = State.FOLLOWER
             self.heartbeat = True
             self.cur_term = in_params.term
             self.voted_for = None
-        if self.cur_term > in_params.term or in_params.prev_log_index > len(self.log):  # 1 and 2 rec impl
+        else:
+            success = False  # 1 rec impl
+        if in_params.prev_log_index > len(self.log):  # 2 rec impl
             return AppendOutDataModel(term=self.cur_term, success=False)
         for i, entry in enumerate(in_params.entries):  # 3 and 4 rec impl
             if in_params.prev_log_index + i < len(self.log):
@@ -181,7 +176,7 @@ class MySyncObj:
                 self.log.append(entry)
         if in_params.leader_commit > self.commit_index:  # 5 rec impl
             self.commit_index = min(in_params.leader_commit, len(self.log))
-        return AppendOutDataModel(term=self.cur_term, success=True)
+        return AppendOutDataModel(term=self.cur_term, success=success)
 
     def start(self):
         self.cur_state = State.FOLLOWER
