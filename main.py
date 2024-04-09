@@ -2,47 +2,60 @@ import sys
 from contextlib import asynccontextmanager
 
 import uvicorn
-from stateMachine import Entry, CommandType
-from messages import *
-from mySyncObj import MySyncObj
+
+from mySyncObj import *
 
 api_v1 = jsonrpc.Entrypoint('/api/v1/jsonrpc')
 
 
 @api_v1.method(errors=[MyError])
-async def request_vote(in_params: VoteInDataModel) -> VoteOutDataModel:
-    return await my_raft.request_vote_handler(in_params)
+def request_vote(in_params: VoteInDataModel) -> VoteOutDataModel:
+    return my_raft.request_vote_handler(in_params)
 
 
 @api_v1.method(errors=[MyError])
-async def append_entries(in_params: AppendInDataModel) -> AppendOutDataModel:
-    return await my_raft.append_entries_handler(in_params)
+def append_entries(in_params: AppendInDataModel) -> AppendOutDataModel:
+    return my_raft.append_entries_handler(in_params)
 
 
 @api_v1.method(errors=[MyError])
 def create(key, value):
-    entry = Entry(CommandType.CREATE, my_raft.cur_term, key, value)
-    my_raft.log.append(entry)
-    print("CREATE " + my_raft.log[-1].key)
+    if my_raft.cur_state == State.LEADER:
+        entry = Entry(CommandType.CREATE, my_raft.cur_term, key, value)
+        my_raft.log.append(entry)
+        return True
+    else:
+        return my_raft.redirect(f"create?key={key}&value={value}")
 
 
 @api_v1.method(errors=[MyError])
-def read(key, value):
-    entry = Entry(CommandType.READ, my_raft.cur_term, key, value)
-    res = my_raft.state_machine.apply(entry)
-    return res
+def read(key):
+    if my_raft.cur_state == State.LEADER:
+        entry = Entry(CommandType.READ, my_raft.cur_term, key)
+        res = my_raft.state_machine.apply(entry)
+        return res
+    else:
+        return my_raft.redirect(f"read?key={key}")
 
 
 @api_v1.method(errors=[MyError])
 def update(key, value):
-    entry = Entry(CommandType.UPDATE, my_raft.cur_term, key, value)
-    my_raft.log.append(entry)
+    if my_raft.cur_state == State.LEADER:
+        entry = Entry(CommandType.UPDATE, my_raft.cur_term, key, value)
+        my_raft.log.append(entry)
+        return True
+    else:
+        return my_raft.redirect(f"update?key={key}&value={value}")
 
 
 @api_v1.method(errors=[MyError])
-def delete(key, value):
-    entry = Entry(CommandType.DELETE, my_raft.cur_term, key, value)
-    my_raft.log.append(entry)
+def delete(key):
+    if my_raft.cur_state == State.LEADER:
+        entry = Entry(CommandType.DELETE, my_raft.cur_term, key)
+        my_raft.log.append(entry)
+        return True
+    else:
+        return my_raft.redirect(f"delete?key={key}")
 
 
 if __name__ == '__main__':

@@ -10,7 +10,7 @@ class CommandType(Enum):
 
 class Entry:
 
-    def __init__(self, cmd: CommandType, term: int, key, value):
+    def __init__(self, cmd: CommandType, term: int, key, value=None):
         self.cmd = cmd
         self.term = term
         self.key = key

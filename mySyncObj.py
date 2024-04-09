@@ -24,6 +24,7 @@ class MySyncObj:
     port: int = None
     other_ports = []
     start_port = None
+    leader_id = None
 
     cur_state = State.FOLLOWER
     cur_term = 0
@@ -48,6 +49,11 @@ class MySyncObj:
     def updTM(self):
         self.timestamp = time.time()
 
+    def is_timeout(self) -> bool:
+        now = time.time()
+        delay = now - self.timestamp
+        return delay > self.election_timeout
+
     def set_election_tm(self, success_elec: bool = True):
         if success_elec:
             self.election_timeout = 5 + random.randint(10, 30) * 0.01
@@ -63,20 +69,19 @@ class MySyncObj:
                 self.other_ports.append(p)
 
     def quorum(self, voted: int) -> bool:
-        return voted > len(self.other_ports) / 2
+        return voted >= (len(self.other_ports) + 1) // 2 + 1
 
     def send_heartbeat(self, to: int):
         pr_log_term = self.log[-1].term if len(self.log) else 0
         msg = AppendInDataModel(term=self.cur_term, leader_id=self.port, prev_log_index=len(self.log),
                                 prev_log_term=pr_log_term, entries=[], leader_commit=self.commit_index)
-        self.transport.send("append_entries", msg, self.loc_ip, to)
+        return self.transport.send("append_entries", msg, self.loc_ip, to)
 
     def do_work(self):
-        now = time.time()
-        delay = now - self.timestamp
-        if self.commit_index > self.last_applied:  # TODO respond client after apply from leader
+        if self.commit_index > self.last_applied:
             self.state_machine.apply(self.log[self.last_applied])
             self.last_applied += 1
+            print("Apply: " + str(self.last_applied))
 
         if self.cur_state == State.LEADER:
             self.updTM()
@@ -84,14 +89,18 @@ class MySyncObj:
                 follower_num = port - self.start_port
                 entries = self.log[self.next_index[follower_num]:]
                 if not entries:
-                    self.send_heartbeat(port)
-                    continue
-                msg = AppendInDataModel(term=self.cur_term, leader_id=self.port, prev_log_index=self.next_index[follower_num],
-                                        prev_log_term=entries[0].term, entries=entries, leader_commit=self.commit_index)
-                res = self.transport.send("append_entries", msg, self.loc_ip, port)
-                print('append res', res)
+                    res = self.send_heartbeat(port)
+                else:
+                    msg = AppendInDataModel(term=self.cur_term, leader_id=self.port, prev_log_index=self.next_index[follower_num],
+                                            prev_log_term=entries[0].term, entries=entries, leader_commit=self.commit_index)
+                    res = self.transport.send("append_entries", msg, self.loc_ip, port)
+                    print('append res', res)
                 try:
-                    if bool(res["success"]):
+                    if int(res["term"]) > self.cur_term:
+                        self.cur_term = int(res["term"])
+                        self.voted_for = None
+                        self.cur_state = State.FOLLOWER
+                    elif bool(res["success"]):
                         self.next_index[follower_num] = len(self.log)
                         self.match_index[follower_num] = len(self.log)
                     else:
@@ -99,13 +108,13 @@ class MySyncObj:
                 except Exception:
                     continue
             for N in range(len(self.log), self.commit_index, -1):
-                k_repl = sum([m >= N for m in self.match_index])
+                k_repl = sum([m >= N for m in self.match_index]) + 1
                 if self.quorum(k_repl) and self.log[N - 1].term == self.cur_term:
                     self.commit_index = N
                     break
 
         elif self.cur_state == State.FOLLOWER:
-            if delay > self.election_timeout and not self.heartbeat:
+            if self.is_timeout() and not self.heartbeat:
                 self.cur_state = State.CANDIDATE
                 self.set_election_tm()
                 self.election()
@@ -140,26 +149,35 @@ class MySyncObj:
                 self.send_heartbeat(port)
             self.next_index = [len(self.log)] * (len(self.other_ports) + 1)
             self.match_index = [0] * (len(self.other_ports) + 1)
+        else:
+            self.voted_for = None
+            self.cur_state = State.FOLLOWER
         self.heartbeat = True
         self.set_election_tm(success_elec=False)
 
-    async def request_vote_handler(self, in_params: VoteInDataModel) -> VoteOutDataModel:
-        self.updTM()
+    def request_vote_handler(self, in_params: VoteInDataModel) -> VoteOutDataModel:
+        if not self.is_timeout():
+            return
         vote_granted = False
         print("Vote request from " + str(in_params.candidate_id) + " to " + str(self.port))
-        if self.cur_term <= in_params.term and self.voted_for in [None, in_params.candidate_id] and \
-                len(self.log) <= in_params.last_log_index:
+        if self.cur_term > in_params.term:
+            return VoteOutDataModel(term=self.cur_term, vote_granted=False)
+        self.cur_term = in_params.term
+        if self.voted_for in [None, in_params.candidate_id] and len(self.log) <= in_params.last_log_index:
             vote_granted = True
             self.voted_for = in_params.candidate_id
             self.cur_term = in_params.term
             self.cur_state = State.FOLLOWER
             print("VOTED FOR " + " " + str(in_params.candidate_id))
+        else:
+            print(f"not voted: {len(self.log)} {in_params.last_log_index} {self.voted_for}")
         return VoteOutDataModel(term=self.cur_term, vote_granted=vote_granted)
 
-    async def append_entries_handler(self, in_params: AppendInDataModel) -> AppendOutDataModel:
+    def append_entries_handler(self, in_params: AppendInDataModel) -> AppendOutDataModel:
         self.updTM()
         print("Append request from " + str(in_params.leader_id) + " to " + str(self.port) + " with term " + str(in_params.term))
         success = True
+        self.leader_id = in_params.leader_id
         if self.cur_term <= in_params.term:
             self.cur_state = State.FOLLOWER
             self.heartbeat = True
@@ -168,15 +186,21 @@ class MySyncObj:
         else:
             success = False  # 1 rec impl
         if in_params.prev_log_index > len(self.log):  # 2 rec impl
+            print(f"Append response small log: {self.cur_term}, {len(self.log)}")
             return AppendOutDataModel(term=self.cur_term, success=False)
-        for i, entry in enumerate(in_params.entries):  # 3 and 4 rec impl
+        for i, e_dict in enumerate(in_params.entries):  # 3 and 4 rec impl
+            entry = Entry(CommandType(e_dict['cmd']), e_dict['term'], e_dict['key'], e_dict.get('value', None))
             if in_params.prev_log_index + i < len(self.log):
                 self.log[in_params.prev_log_index + i] = entry
             else:
                 self.log.append(entry)
         if in_params.leader_commit > self.commit_index:  # 5 rec impl
             self.commit_index = min(in_params.leader_commit, len(self.log))
+        print(f"Append response: {self.cur_term}, {success}")
         return AppendOutDataModel(term=self.cur_term, success=success)
+
+    def redirect(self, req: str):
+        return self.transport.redirect(req, self.loc_ip, self.leader_id).replace('"', '')
 
     def start(self):
         self.cur_state = State.FOLLOWER
