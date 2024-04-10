@@ -200,6 +200,8 @@ class MySyncObj:
         return AppendOutDataModel(term=self.cur_term, success=success)
 
     def redirect(self, req: str):
+        if not self.leader_id:
+            return "The leader has not yet been found. Please try again later."
         return self.transport.redirect(req, self.loc_ip, self.leader_id).replace('"', '')
 
     def start(self):
