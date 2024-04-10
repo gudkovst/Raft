@@ -11,10 +11,14 @@ fastapi_jsonrpc можно установить [отсюда](https://github.co
 
 Для управления журналом:
 
+[ 
 http://localhost:[port]/create?key=key&value=value
 
+[
 http://localhost:[port]/read?key=key
 
+[
 http://localhost:[port]/update?key=key&value=value
 
+[
 http://localhost:[port]/delete?key=key
