@@ -1,7 +1,7 @@
 import random
 import time
-from threading import Timer
-
+from threading import Timer, Lock
+from concurrent.futures import ThreadPoolExecutor
 from messages import *
 from stateMachine import *
 from transportLayer import TransportRPC
@@ -45,6 +45,7 @@ class MySyncObj:
     def __init__(self):
         self.timer = RepeatTimer(5.0, self.do_work)
         self.state_machine = StateMachine()
+        self.apply_lock = Lock()
 
     def updTM(self):
         self.timestamp = time.time()
@@ -77,11 +78,17 @@ class MySyncObj:
                                 prev_log_term=pr_log_term, entries=[], leader_commit=self.commit_index)
         return self.transport.send("append_entries", msg, self.loc_ip, to)
 
+    def apply(self):
+        with self.apply_lock:
+            while self.commit_index > self.last_applied:
+                self.state_machine.apply(self.log[self.last_applied])
+                self.last_applied += 1
+                print("Apply: " + str(self.last_applied))
+
     def do_work(self):
         if self.commit_index > self.last_applied:
-            self.state_machine.apply(self.log[self.last_applied])
-            self.last_applied += 1
-            print("Apply: " + str(self.last_applied))
+            with ThreadPoolExecutor() as applier:
+                applier.submit(self.apply)
 
         if self.cur_state == State.LEADER:
             self.updTM()
@@ -104,7 +111,7 @@ class MySyncObj:
                         self.next_index[follower_num] = len(self.log)
                         self.match_index[follower_num] = len(self.log)
                     else:
-                        self.next_index[follower_num] -= 1
+                        self.next_index[follower_num] = int(res["commit_index"])
                 except Exception:
                     continue
             for N in range(len(self.log), self.commit_index, -1):
@@ -187,7 +194,7 @@ class MySyncObj:
             success = False  # 1 rec impl
         if in_params.prev_log_index > len(self.log):  # 2 rec impl
             print(f"Append response small log: {self.cur_term}, {len(self.log)}")
-            return AppendOutDataModel(term=self.cur_term, success=False)
+            return AppendOutDataModel(term=self.cur_term, success=False, commit_index=self.commit_index)
         for i, e_dict in enumerate(in_params.entries):  # 3 and 4 rec impl
             entry = Entry(CommandType(e_dict['cmd']), e_dict['term'], e_dict['key'], e_dict.get('value', None))
             if in_params.prev_log_index + i < len(self.log):
@@ -197,7 +204,7 @@ class MySyncObj:
         if in_params.leader_commit > self.commit_index:  # 5 rec impl
             self.commit_index = min(in_params.leader_commit, len(self.log))
         print(f"Append response: {self.cur_term}, {success}")
-        return AppendOutDataModel(term=self.cur_term, success=success)
+        return AppendOutDataModel(term=self.cur_term, success=success, commit_index=self.commit_index)
 
     def redirect(self, req: str):
         if not self.leader_id:

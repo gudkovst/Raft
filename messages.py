@@ -35,3 +35,4 @@ class AppendInDataModel(BaseModel):
 class AppendOutDataModel(BaseModel):
     term: int
     success: bool
+    commit_index: int
