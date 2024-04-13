@@ -1,7 +1,8 @@
 import random
 import time
-from threading import Timer, Lock
 from concurrent.futures import ThreadPoolExecutor
+from threading import Timer, Lock
+
 from messages import *
 from stateMachine import *
 from transportLayer import TransportRPC
@@ -45,6 +46,7 @@ class MySyncObj:
     def __init__(self):
         self.timer = RepeatTimer(5.0, self.do_work)
         self.state_machine = StateMachine()
+        self.applier = ThreadPoolExecutor()
         self.apply_lock = Lock()
 
     def updTM(self):
@@ -87,8 +89,7 @@ class MySyncObj:
 
     def do_work(self):
         if self.commit_index > self.last_applied:
-            with ThreadPoolExecutor() as applier:
-                applier.submit(self.apply)
+            self.applier.submit(self.apply)
 
         if self.cur_state == State.LEADER:
             self.updTM()
