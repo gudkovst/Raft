@@ -1,7 +1,6 @@
 import random
-import time
 from concurrent.futures import ThreadPoolExecutor
-from threading import Timer, Lock
+from threading import Timer, Condition
 
 from messages import *
 from stateMachine import *
@@ -40,14 +39,15 @@ class MySyncObj:
     heartbeat = False
     timestamp = None
     timer = None
+    breaker = None
     election_timeout = None
     transport = TransportRPC()
+    cas_cond_var = Condition(lock=None)
 
     def __init__(self):
         self.timer = RepeatTimer(5.0, self.do_work)
         self.state_machine = StateMachine()
         self.applier = ThreadPoolExecutor()
-        self.apply_lock = Lock()
 
     def updTM(self):
         self.timestamp = time.time()
@@ -81,11 +81,16 @@ class MySyncObj:
         return self.transport.send("append_entries", msg, self.loc_ip, to)
 
     def apply(self):
-        with self.apply_lock:
-            while self.commit_index > self.last_applied:
-                self.state_machine.apply(self.log[self.last_applied])
-                self.last_applied += 1
-                print("Apply: " + str(self.last_applied))
+        while self.commit_index > self.last_applied:
+            apply_cmd = self.log[self.last_applied]
+            res = self.state_machine.apply(apply_cmd)
+            self.last_applied += 1
+            print("Apply: " + str(self.last_applied) + " " + apply_cmd.cmd.name)
+            if apply_cmd.cmd == CommandType.CAS:
+                print("Apply: CAS from " + str(apply_cmd.old_value) + " to " + str(apply_cmd.value) + " with res = " + str(res))
+                if apply_cmd.value == str(self.port):
+                    with self.cas_cond_var:
+                        self.cas_cond_var.notify()
 
     def do_work(self):
         if self.commit_index > self.last_applied:
@@ -99,8 +104,10 @@ class MySyncObj:
                 if not entries:
                     res = self.send_heartbeat(port)
                 else:
-                    msg = AppendInDataModel(term=self.cur_term, leader_id=self.port, prev_log_index=self.next_index[follower_num],
-                                            prev_log_term=entries[0].term, entries=entries, leader_commit=self.commit_index)
+                    msg = AppendInDataModel(term=self.cur_term, leader_id=self.port,
+                                            prev_log_index=self.next_index[follower_num],
+                                            prev_log_term=entries[0].term, entries=entries,
+                                            leader_commit=self.commit_index)
                     res = self.transport.send("append_entries", msg, self.loc_ip, port)
                     print('append res', res)
                 try:
@@ -108,6 +115,7 @@ class MySyncObj:
                         self.cur_term = int(res["term"])
                         self.voted_for = None
                         self.cur_state = State.FOLLOWER
+                        self.breaker.cancel()
                     elif bool(res["success"]):
                         self.next_index[follower_num] = len(self.log)
                         self.match_index[follower_num] = len(self.log)
@@ -143,6 +151,7 @@ class MySyncObj:
                     self.cur_term = int(response["term"])
                     self.voted_for = None
                     self.cur_state = State.FOLLOWER
+                    self.breaker.cancel()
                     return
                 if bool(response["vote_granted"]):
                     votes += 1
@@ -152,11 +161,14 @@ class MySyncObj:
                 continue
         if self.quorum(votes):
             self.cur_state = State.LEADER
+            self.leader_id = self.port
             print("IM LEADER")
             for port in self.other_ports:
                 self.send_heartbeat(port)
             self.next_index = [len(self.log)] * (len(self.other_ports) + 1)
             self.match_index = [0] * (len(self.other_ports) + 1)
+            self.breaker = RepeatTimer(5.0, self.break_mutex)
+            self.breaker.start()
         else:
             self.voted_for = None
             self.cur_state = State.FOLLOWER
@@ -176,6 +188,7 @@ class MySyncObj:
             self.voted_for = in_params.candidate_id
             self.cur_term = in_params.term
             self.cur_state = State.FOLLOWER
+            self.breaker.cancel()
             print("VOTED FOR " + " " + str(in_params.candidate_id))
         else:
             print(f"not voted: {len(self.log)} {in_params.last_log_index} {self.voted_for}")
@@ -183,11 +196,13 @@ class MySyncObj:
 
     def append_entries_handler(self, in_params: AppendInDataModel) -> AppendOutDataModel:
         self.updTM()
-        print("Append request from " + str(in_params.leader_id) + " to " + str(self.port) + " with term " + str(in_params.term))
+        print("Append request from " + str(in_params.leader_id) + " to " + str(self.port) + " with term " + str(
+            in_params.term))
         success = True
         self.leader_id = in_params.leader_id
         if self.cur_term <= in_params.term:
             self.cur_state = State.FOLLOWER
+            self.breaker.cancel()
             self.heartbeat = True
             self.cur_term = in_params.term
             self.voted_for = None
@@ -197,7 +212,8 @@ class MySyncObj:
             print(f"Append response small log: {self.cur_term}, {len(self.log)}")
             return AppendOutDataModel(term=self.cur_term, success=False, commit_index=self.commit_index)
         for i, e_dict in enumerate(in_params.entries):  # 3 and 4 rec impl
-            entry = Entry(CommandType(e_dict['cmd']), e_dict['term'], e_dict['key'], e_dict.get('value', None))
+            entry = Entry(CommandType(e_dict['cmd']), e_dict['term'], e_dict['key'], e_dict.get('value', None),
+                          e_dict.get('old_value', None))
             if in_params.prev_log_index + i < len(self.log):
                 self.log[in_params.prev_log_index + i] = entry
             else:
@@ -211,6 +227,24 @@ class MySyncObj:
         if not self.leader_id:
             return "The leader has not yet been found. Please try again later."
         return self.transport.redirect(req, self.loc_ip, self.leader_id).replace('"', '')
+
+    def lock(self):
+        with self.cas_cond_var:
+            while self.redirect(f"read_mutex") != str(self.port):
+                self.redirect(f"cas?old_value=0&new_value={self.port}")
+                self.cas_cond_var.wait()
+
+    def critical_section(self):
+        self.lock()
+        print(f"Node {self.port} begin critical section on {time.time() % 10000}")
+        time.sleep(5.0)
+        print(f"Node {self.port} end critical section on {time.time() % 10000}")
+        self.redirect(f"cas?old_value={self.port}&new_value=0")
+
+    def break_mutex(self):
+        if self.state_machine.mutex.is_dead(15):
+            owner = self.state_machine.mutex.value
+            self.redirect(f"cas?old_value={owner}&new_value=0")
 
     def start(self):
         self.cur_state = State.FOLLOWER
