@@ -72,6 +72,9 @@ class StateMachine:
     def read_mutex(self, *args):
         return self.mutex.value
 
+    def can_cas(self, entry: Entry):
+        return entry.cmd == CommandType.CAS and self.mutex.value == entry.old_value
+
     def apply(self, entry: Entry):
         try:
             func = getattr(self, entry.cmd.name.lower())

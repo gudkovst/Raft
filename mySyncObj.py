@@ -1,6 +1,6 @@
 import random
 from concurrent.futures import ThreadPoolExecutor
-from threading import Timer, Condition
+from threading import Timer, Condition, Lock
 
 from messages import *
 from stateMachine import *
@@ -43,6 +43,9 @@ class MySyncObj:
     election_timeout = None
     transport = TransportRPC()
     cas_cond_var = Condition(lock=None)
+
+    lock_cas = Lock()
+    cas_in_log = False
 
     def __init__(self):
         self.timer = RepeatTimer(5.0, self.do_work)
@@ -87,10 +90,12 @@ class MySyncObj:
             self.last_applied += 1
             print("Apply: " + str(self.last_applied) + " " + apply_cmd.cmd.name)
             if apply_cmd.cmd == CommandType.CAS:
+                self.lock_cas.acquire()
+                self.cas_in_log = False
+                self.lock_cas.release()
                 print("Apply: CAS from " + str(apply_cmd.old_value) + " to " + str(apply_cmd.value) + " with res = " + str(res))
-                if apply_cmd.value == str(self.port):
-                    with self.cas_cond_var:
-                        self.cas_cond_var.notify()
+                with self.cas_cond_var:
+                    self.cas_cond_var.notify()
 
     def do_work(self):
         if self.commit_index > self.last_applied:
@@ -115,7 +120,8 @@ class MySyncObj:
                         self.cur_term = int(res["term"])
                         self.voted_for = None
                         self.cur_state = State.FOLLOWER
-                        self.breaker.cancel()
+                        if self.breaker:
+                            self.breaker.cancel()
                     elif bool(res["success"]):
                         self.next_index[follower_num] = len(self.log)
                         self.match_index[follower_num] = len(self.log)
@@ -151,7 +157,8 @@ class MySyncObj:
                     self.cur_term = int(response["term"])
                     self.voted_for = None
                     self.cur_state = State.FOLLOWER
-                    self.breaker.cancel()
+                    if self.breaker:
+                        self.breaker.cancel()
                     return
                 if bool(response["vote_granted"]):
                     votes += 1
@@ -188,7 +195,8 @@ class MySyncObj:
             self.voted_for = in_params.candidate_id
             self.cur_term = in_params.term
             self.cur_state = State.FOLLOWER
-            self.breaker.cancel()
+            if self.breaker:
+                self.breaker.cancel()
             print("VOTED FOR " + " " + str(in_params.candidate_id))
         else:
             print(f"not voted: {len(self.log)} {in_params.last_log_index} {self.voted_for}")
@@ -202,7 +210,8 @@ class MySyncObj:
         self.leader_id = in_params.leader_id
         if self.cur_term <= in_params.term:
             self.cur_state = State.FOLLOWER
-            self.breaker.cancel()
+            if self.breaker:
+                self.breaker.cancel()
             self.heartbeat = True
             self.cur_term = in_params.term
             self.voted_for = None

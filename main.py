@@ -61,9 +61,15 @@ def delete(key):
 @api_v1.method(errors=[MyError])
 def cas(old_value, new_value):
     if my_raft.cur_state == State.LEADER:
+        my_raft.lock_cas.acquire()
+        res = False
         entry = Entry(CommandType.CAS, my_raft.cur_term, "__mutex", new_value, old_value)
-        my_raft.log.append(entry)
-        return True
+        if not my_raft.cas_in_log and my_raft.state_machine.can_cas(entry):
+            my_raft.log.append(entry)
+            my_raft.cas_in_log = True
+            res = True
+        my_raft.lock_cas.release()
+        return res
     else:
         return my_raft.redirect(f"cas?old_value={old_value}&new_value={new_value}")
 
@@ -75,6 +81,11 @@ def read_mutex():
         return my_raft.state_machine.apply(entry)
     else:
         return my_raft.redirect(f"read_mutex")
+
+
+@api_v1.method(errors=[MyError])
+def unlock(node):
+    return my_raft.redirect(f"cas?old_value={node}&new_value=0")
 
 
 @api_v1.method(errors=[MyError])
@@ -107,5 +118,6 @@ if __name__ == '__main__':
     app.add_api_route("/cas", cas, methods=["GET"])
     app.add_api_route("/crit_sec", crit_sec, methods=["GET"])
     app.add_api_route("/read_mutex", read_mutex, methods=["GET"])
+    app.add_api_route("/unlock", unlock, methods=["GET"])
 
     uvicorn.run(app, host=my_raft.loc_ip, port=my_raft.port, log_level="critical")
